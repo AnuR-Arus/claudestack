@@ -558,7 +558,8 @@ func settingsSnapshot(to path: String) {
     try? rep.representation(using: .png, properties: [:])?.write(to: URL(fileURLWithPath: path))
 }
 
-/// Wednesday 2026-10-07, default hours. Busy all day except a 6-minute pause at 11:40 and lunch.
+/// Wednesday 2026-10-07, default hours. Busy all day except lunch and three 7-minute pauses
+/// (10:05, 10:50, 11:40), like reading an answer. Short pauses are not breaks, so rest still comes.
 /// Each reminder is answered one minute after it appears, as a person would.
 func coachSim() {
     let store = UserDefaults(suiteName: "local.sundaran.claudestack.sim")!
@@ -574,10 +575,11 @@ func coachSim() {
     var last: String?
     while t < stop {
         let m = cal.component(.hour, from: t) * 60 + cal.component(.minute, from: t)
-        // At the desk all day, except a 6-minute pause at 11:40 and lunch away from the Mac.
-        let away = (m >= 11 * 60 + 40 && m < 11 * 60 + 46) || (m >= 13 * 60 && m < 13 * 60 + 45)
-        let awaySince = m >= 13 * 60 ? 13 * 60 : 11 * 60 + 40
-        c.tick(busy: !away, idle: away ? Double(m - awaySince) * 60 + 1 : 2, now: t)
+        // At the desk all day, except three 7-minute pauses and lunch away from the Mac.
+        let pauses = [10 * 60 + 5, 10 * 60 + 50, 11 * 60 + 40]
+        let awaySince = m >= 13 * 60 && m < 13 * 60 + 45 ? 13 * 60 : pauses.first { m >= $0 && m < $0 + 7 }
+        let away = awaySince != nil
+        c.tick(busy: !away, idle: awaySince.map { Double(m - $0) * 60 + 1 } ?? 2, now: t)
         // Print the kind only: "25 minutes left" counting down is the same card.
         let name = c.reminder.map { String("\($0)".prefix { $0 != "(" }) }
         if name != last, let name { print("\(f.string(from: t)) \(name)"); shownAt = t }
@@ -586,6 +588,21 @@ func coachSim() {
         t = t.addingTimeInterval(5)
     }
     print("summary work=\(hm(c.summary.workSecs)) water=\(c.summary.water) breaks=\(c.summary.breaks) phase=\(c.phase)")
+    // The rest timer: a 9-minute pause keeps it, a 10-minute pause starts it again.
+    func restAfterPause(_ minutes: Int) -> Double {
+        let s = UserDefaults(suiteName: "local.sundaran.claudestack.sim2")!
+        s.removePersistentDomain(forName: "local.sundaran.claudestack.sim2")
+        let p = DayCoach(store: s, useLog: false)
+        p.soundOn = false
+        p.config = DayConfig()
+        var u = cal.date(from: DateComponents(year: 2026, month: 10, day: 7, hour: 10))!
+        for _ in 0..<720 { p.tick(busy: true, idle: 2, now: u); u = u.addingTimeInterval(5) }   // an hour at the desk
+        for k in 0...(minutes * 12) { p.tick(busy: false, idle: Double(k * 5) + 1, now: u); u = u.addingTimeInterval(5) }
+        p.tick(busy: true, idle: 2, now: u)
+        return p.restFraction
+    }
+    print("pause 9 min keeps rest timer=\(restAfterPause(9) > 0.4)")
+    print("pause 10 min starts rest timer again=\(restAfterPause(10) < 0.01)")
     // Saturday: no reminders at all.
     let sat = DayCoach(store: store, useLog: false)
     sat.config = DayConfig()

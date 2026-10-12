@@ -55,15 +55,17 @@ if [ "$(jq -r '.items | length' <<<"$sub")" = "0" ]; then echo "ok   main reader
 sc=$("$BIN" --scroll-test fixture.jsonl scroll-test.js)
 if [ "$(jq -r '.movedWhileReading == 0 and .jumpButton and .gapAtEnd < 4' <<<"$sc")" = "true" ]; then echo "ok   scroll stays put while reading, follows at the bottom"; else echo "FAIL scroll: $sc"; fail=1; fi
 
-# Day coach: a simulated Wednesday (busy all day, a short pause at 11:40, lunch away) and a Saturday.
+# Day coach: a simulated Wednesday (busy all day, three 7-minute pauses, lunch away) and a Saturday.
+# Short pauses are not breaks, so rest still comes after two hours of work.
 sim=$("$BIN" --coach-sim)
 # After the rest, water starts again too, so the next water is an hour of work later.
-expect="10:30 water
-11:30 rest
-12:32 water
+# Each 7-minute pause stops work time for 2 minutes, so reminders come 2 to 4 minutes later.
+expect="10:32 water
+11:34 rest
+12:37 water
 13:00 lunch"
 if [ "$(head -4 <<<"$sim")" = "$expect" ]; then echo "ok   coach: water, rest, water reset by the rest, and lunch at the right times"; else echo "FAIL coach morning:"; head -4 <<<"$sim"; fail=1; fi
-for want in "18:00 windDown" "18:30 dayDone" "18:45 overtime" "19:00 overtime" "saturday phase=off reminders=false"; do
+for want in "pause 9 min keeps rest timer=true" "pause 10 min starts rest timer again=true" "18:00 windDown" "18:30 dayDone" "18:45 overtime" "19:00 overtime" "saturday phase=off reminders=false"; do
   if grep -qx "$want" <<<"$sim"; then echo "ok   coach: $want"; else echo "FAIL coach: $want missing"; fail=1; fi
 done
 # Time-check hook: silent before 6 PM, on weekends and for slash commands; speaks after 6 PM.
