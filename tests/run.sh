@@ -65,12 +65,20 @@ expect="10:32 water
 12:37 water
 13:00 lunch"
 if [ "$(head -4 <<<"$sim")" = "$expect" ]; then echo "ok   coach: water, rest, water reset by the rest, and lunch at the right times"; else echo "FAIL coach morning:"; head -4 <<<"$sim"; fail=1; fi
+for want in "auto default on=true minutes=480" "old config kept start=10:00 water=45 auto=true minutes=480" \
+  "auto 08:00 phase=before" "auto 17:27 windDown" "auto 17:57 dayDone" "auto start=09:12 end=17:57 check=17:27" \
+  "auto no reminders before start=true phase=done" "auto 04:30 input starts day=false" "auto restart early=07:00 now=09:30" \
+  "auto end from 08:00 4h=12:00 from 14:00 8h=22:00 from 13:20 8h=21:45" "auto saturday phase=off started=false"; do
+  if grep -qx "$want" <<<"$sim"; then echo "ok   coach: $want"; else echo "FAIL coach: $want missing"; fail=1; fi
+done
 for want in "pause 9 min keeps rest timer=true" "pause 10 min starts rest timer again=true" "18:00 windDown" "18:30 dayDone" "18:45 overtime" "19:00 overtime" "saturday phase=off reminders=false"; do
   if grep -qx "$want" <<<"$sim"; then echo "ok   coach: $want"; else echo "FAIL coach: $want missing"; fail=1; fi
 done
 # Time-check hook: silent before 6 PM, on weekends and for slash commands; speaks after 6 PM.
-# An empty HOME, so the hook uses the default hours and not the ones saved in Settings.
+# A temp HOME with fixed hours 09:30 to 18:30, not the ones saved in Settings.
 th=$(mktemp -d)
+mkdir -p "$th/.claude/stack/days"
+echo '{"autoStart":false}' > "$th/.claude/stack/day.json"
 hk() { printf '%s' "{\"prompt\":\"$1\"}" | HOME=$th DAYHOOK_CLOCK=$2 DAYHOOK_WEEKDAY=$3 bash ../day-hook.sh | wc -l | tr -d ' '; }
 [ "$(hk "Add a page" 17:30 4)" = 0 ] && [ "$(hk "Add a page" 18:05 1)" = 0 ] && [ "$(hk "/context" 18:05 4)" = 0 ] \
   && echo "ok   day hook silent before 6 PM, on Sunday, for slash commands" || { echo "FAIL day hook spoke when it should not"; fail=1; }
@@ -78,6 +86,18 @@ printf '%s' '{"prompt":"Add a page"}' | HOME=$th DAYHOOK_CLOCK=18:05 DAYHOOK_WEE
   && echo "ok   day hook asks for a time check at 18:05" || { echo "FAIL day hook at 18:05"; fail=1; }
 printf '%s' '{"prompt":"Add a page"}' | HOME=$th DAYHOOK_CLOCK=18:50 DAYHOOK_WEEKDAY=4 bash ../day-hook.sh | grep -q "ended at 18:30, 20 minutes ago" \
   && echo "ok   day hook says the day is over at 18:50" || { echo "FAIL day hook at 18:50"; fail=1; }
+# Automatic start (the default, so no day.json): silent until the app writes today's hours.
+rm "$th/.claude/stack/day.json"
+[ "$(hk "Add a page" 18:05 4)" = 0 ] && echo "ok   day hook (auto) silent before the day has started" || { echo "FAIL day hook (auto) spoke with no hours"; fail=1; }
+echo '{"start":"09:12","end":"17:57","checkFrom":"17:27","endMin":1077,"checkMin":1047}' > "$th/.claude/stack/days/$(date +%F).hours.json"
+[ "$(hk "Add a page" 17:20 4)" = 0 ] && echo "ok   day hook (auto) silent before 17:27" || { echo "FAIL day hook (auto) at 17:20"; fail=1; }
+printf '%s' '{"prompt":"Add a page"}' | HOME=$th DAYHOOK_CLOCK=17:30 DAYHOOK_WEEKDAY=4 bash ../day-hook.sh | grep -q "ends at 17:57, so 27 minutes are left" \
+  && echo "ok   day hook (auto) asks for a time check at 17:30" || { echo "FAIL day hook (auto) at 17:30"; fail=1; }
+printf '%s' '{"prompt":"Add a page"}' | HOME=$th DAYHOOK_CLOCK=18:07 DAYHOOK_WEEKDAY=4 bash ../day-hook.sh | grep -q "ended at 17:57, 10 minutes ago" \
+  && echo "ok   day hook (auto) says the day is over at 18:07" || { echo "FAIL day hook (auto) at 18:07"; fail=1; }
+# autoStart false must win over the hours file (jq "//" would read false as missing).
+echo '{"autoStart":false}' > "$th/.claude/stack/day.json"
+[ "$(hk "Add a page" 17:30 4)" = 0 ] && echo "ok   day hook uses fixed hours when automatic start is off" || { echo "FAIL day hook read the hours file with autoStart off"; fail=1; }
 rm -rf "$th"
 # Live answer from a saved screen: answer text only, never a tool step or an old answer.
 lv() { "$BIN" --live-parse "screens/$1.txt"; }

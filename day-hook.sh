@@ -2,6 +2,8 @@
 # Day coach time check. A UserPromptSubmit hook: whatever it prints, Claude reads with the prompt.
 # It prints only on a workday, after the "check from" time (6 PM by default), and never for
 # slash or ! commands. Hours come from ~/.claude/stack/day.json, which the app's Settings write.
+# With "Find my start time automatically" (autoStart, on by default), the app writes today's hours
+# to days/<date>.hours.json once you start work. No such file yet means no time check.
 exec 2>/dev/null
 input=$(cat)
 prompt=$(jq -r '.prompt // ""' <<<"$input") || exit 0
@@ -9,6 +11,8 @@ case "$prompt" in /*|!*|"") exit 0 ;; esac
 
 conf="$HOME/.claude/stack/day.json"
 get() { jq -r ".$1 // \"$2\"" "$conf" 2>/dev/null || echo "$2"; }
+# Not "// true": jq treats false as missing there, so autoStart off would read as on.
+auto=$(jq -r 'if has("autoStart") then .autoStart else true end' "$conf" 2>/dev/null || echo true)
 end=$(get end 18:30)
 from=$(get checkFrom 18:00)
 days=$(jq -c '.workdays // [2,3,4,5,6]' "$conf" 2>/dev/null || echo '[2,3,4,5,6]')
@@ -22,8 +26,19 @@ jq -e --argjson d "$wd" 'index($d) != null' <<<"$days" >/dev/null || exit 0
 mins() { local h=${1%%:*} m=${1##*:}; echo $(( 10#$h * 60 + 10#$m )); }
 clock=${DAYHOOK_CLOCK:-$(date +%H:%M)}
 now=$(mins "$clock")
-[ "$now" -lt "$(mins "$from")" ] && exit 0
-left=$(( $(mins "$end") - now ))
+if [ "$auto" = "true" ]; then
+  # Minutes from midnight, so a day that ends after midnight still compares right.
+  hours="$HOME/.claude/stack/days/$(date +%F).hours.json"
+  endmin=$(jq -r '.endMin // empty' "$hours" 2>/dev/null)
+  frommin=$(jq -r '.checkMin // empty' "$hours" 2>/dev/null)
+  end=$(jq -r '.end // empty' "$hours" 2>/dev/null)
+  [ -n "$endmin" ] && [ -n "$frommin" ] && [ -n "$end" ] || exit 0
+else
+  endmin=$(mins "$end")
+  frommin=$(mins "$from")
+fi
+[ "$now" -lt "$frommin" ] && exit 0
+left=$(( endmin - now ))
 
 if [ "$left" -gt 0 ]; then
   cat <<EOF

@@ -92,8 +92,16 @@ Long days with Claude are easy to stretch too far. The coach watches your work t
   after the time-check hour on workdays. Claude then answers first with a `timecheck` block, which
   the reader shows as a card with a clock ring: fits, or does not fit, what to do now and what to
   leave for tomorrow. If it does not fit, Claude asks before starting.
-- **Settings** tab in the reader: day start and end, time-check hour, lunch, workdays, water and
-  rest minutes, sounds, Day off. Saved to `~/.claude/stack/day.json`, which the hook also reads.
+- **Automatic start (on by default):** the day starts at your first keyboard or mouse use after
+  5 AM (or an earlier Claude prompt in today's log, if the app opened late). It ends after your
+  **work hours** (8 by default), plus the part of lunch after your start. The time check starts
+  30 minutes before that end. When the hours are done, the strip turns green with a tick and the
+  "Day complete" card shows. The app writes today's hours to `days/<date>.hours.json` for the
+  hook. Settings shows today's start and end, greyed out, and **Start my day again from now** for
+  a day that started too early. Turn it off to use fixed start and end times instead.
+- **Settings** tab in the reader: automatic start and work hours, or fixed day start and end and
+  time-check hour, lunch, workdays, water and rest minutes, sounds, Day off. Saved to
+  `~/.claude/stack/day.json`, which the hook also reads.
 - No reminders on weekends or when "Day off" is on.
 
 ## How it works

@@ -23,7 +23,7 @@ struct DayStrip: View {
     var label: String {
         switch coach.phase {
         case "off": return "Day off · \(hm(coach.summary.workSecs)) worked"
-        case "before": return "Day starts at \(coach.config.start)"
+        case "before": return coach.config.autoStart ? "Day starts when you start work" : "Day starts at \(coach.config.start)"
         case "done": return "Day complete · \(hm(coach.summary.workSecs)) worked"
         default: return "\(hm(coach.summary.workSecs)) worked · \(hm(Double(coach.minutesLeft * 60))) left"
         }
@@ -32,6 +32,9 @@ struct DayStrip: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 5) {
             HStack(spacing: 8) {
+                if coach.phase == "done" {
+                    Image(systemName: "checkmark.circle.fill").font(.system(size: compact ? 11 : 12.5)).foregroundColor(calmGreen)
+                }
                 Text(label).font(.system(size: compact ? 10.5 : 11.5, weight: .semibold)).foregroundColor(textC).lineLimit(1)
                 Spacer(minLength: 4)
                 Gauge(icon: "drop.fill", color: water, value: coach.waterFraction, help: "Water: fills up to the next reminder")
@@ -48,8 +51,22 @@ struct DayStrip: View {
         }
         .padding(.horizontal, compact ? 6 : 10).padding(.vertical, compact ? 5 : 8)
         .background(RoundedRectangle(cornerRadius: 10).fill(surface.opacity(compact ? 0.5 : 0.7)))
-        .help("Your day \(coach.config.start) to \(coach.config.end)")
+        .help(helpText)
     }
+
+    var helpText: String {
+        let h = coach.hours()
+        guard let s = h.start, let e = h.end else { return "Your day starts at your first keyboard or mouse use after \(earliestStartHour) AM" }
+        let extra = coach.config.autoStart ? " (\(hoursText(coach.config.workMinutes)) of work, lunch not counted)" : ""
+        return "Your day \(clock(s)) to \(clock(e))\(extra)"
+    }
+}
+
+/// "09:12"
+func clock(_ d: Date) -> String {
+    let f = DateFormatter()
+    f.dateFormat = "HH:mm"
+    return f.string(from: d)
 }
 
 /// A small ring that fills up toward the next reminder.
@@ -255,10 +272,23 @@ struct SettingsView: View {
                 Text("Settings").font(.system(size: 22, weight: .bold)).foregroundColor(textC)
 
                 section("Your day", "Work time, reminders and the evening time check use these hours.") {
-                    timeRow("Day starts", $c.start)
-                    timeRow("Day ends", $c.end)
-                    timeRow("Time check for new tasks from", $c.checkFrom,
-                            note: "After this time, Claude checks if a new task fits before the day ends, and asks you first if it does not.")
+                    VStack(alignment: .leading, spacing: 3) {
+                        Toggle("Find my start time automatically", isOn: $c.autoStart)
+                            .font(.system(size: 12.5, weight: .semibold))
+                        Text(c.autoStart
+                             ? "Your day starts at your first keyboard or mouse use after \(earliestStartHour) AM. It ends after your work hours, plus lunch."
+                             : "Your day uses the start and end times below.")
+                            .font(.system(size: 11)).foregroundColor(muted)
+                    }
+                    if c.autoStart {
+                        hoursRow
+                        autoTimesRows
+                    } else {
+                        timeRow("Day starts", $c.start)
+                        timeRow("Day ends", $c.end)
+                        timeRow("Time check for new tasks from", $c.checkFrom,
+                                note: "After this time, Claude checks if a new task fits before the day ends, and asks you first if it does not.")
+                    }
                     timeRow("Lunch starts", $c.lunchStart)
                     timeRow("Lunch ends", $c.lunchEnd)
                     VStack(alignment: .leading, spacing: 6) {
@@ -313,6 +343,56 @@ struct SettingsView: View {
         .scrollIndicators(.never)   // .hidden loses to "Always show scroll bars" in System Settings
         .background(bg)
         .onAppear { c = coach.config }
+    }
+
+    /// The length of an automatic day.
+    var hoursRow: some View {
+        VStack(alignment: .leading, spacing: 3) {
+            HStack {
+                Text("Work hours per day").font(.system(size: 12.5, weight: .semibold))
+                Spacer()
+                Stepper(hoursText(c.workMinutes), value: $c.workMinutes, in: 60...720, step: 30)
+                    .font(.system(size: 15, weight: .semibold, design: .rounded))
+                    .controlSize(.large)
+            }
+            Text("Lunch is not counted. When these hours are done, the day shows as complete.")
+                .font(.system(size: 11)).foregroundColor(muted)
+        }
+    }
+
+    /// Today's start, end and time check, found automatically. Shown, not edited.
+    var autoTimesRows: some View {
+        let h = coach.hours(c)
+        return VStack(alignment: .leading, spacing: 12) {
+            readOnlyRow("Day starts", h.start.map { "\(clock($0)) today" } ?? "When you start work")
+            readOnlyRow("Day ends", h.end.map { "\(clock($0)) today" } ?? "\(hoursText(c.workMinutes)) after you start, plus lunch")
+            VStack(alignment: .leading, spacing: 3) {
+                readOnlyRow("Time check for new tasks from", h.checkFrom.map { "\(clock($0)) today" } ?? "\(autoCheckMinutes) min before the day ends")
+                Text("After this time, Claude checks if a new task fits before the day ends, and asks you first if it does not.")
+                    .font(.system(size: 11)).foregroundColor(muted)
+            }
+            if h.start != nil && coach.config.autoStart {
+                HStack(spacing: 8) {
+                    Button("Start my day again from now") { coach.restartToday() }
+                        .buttonStyle(CoachButton(color: calmBlue, filled: false))
+                    Text("Use this if the day started too early, like a quick look at the Mac before work.")
+                        .font(.system(size: 11)).foregroundColor(muted)
+                }
+            }
+        }
+    }
+
+    /// A time row that is set by the app. Greyed out, so it reads as "not for you to change".
+    func readOnlyRow(_ label: String, _ value: String) -> some View {
+        HStack {
+            Text(label).font(.system(size: 12.5, weight: .semibold))
+            Spacer()
+            Text(value).font(.system(size: 13, weight: .semibold, design: .rounded))
+                .padding(.horizontal, 10).padding(.vertical, 4)
+                .background(RoundedRectangle(cornerRadius: 8).stroke(muted.opacity(0.4), lineWidth: 1))
+        }
+        .foregroundColor(muted)
+        .help("Found automatically. Turn off \"Find my start time automatically\" to set it yourself.")
     }
 
     func section<Content: View>(_ title: String, _ note: String, @ViewBuilder _ content: () -> Content) -> some View {

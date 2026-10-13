@@ -558,15 +558,17 @@ func settingsSnapshot(to path: String) {
     try? rep.representation(using: .png, properties: [:])?.write(to: URL(fileURLWithPath: path))
 }
 
-/// Wednesday 2026-10-07, default hours. Busy all day except lunch and three 7-minute pauses
+/// Wednesday 2026-10-07, fixed hours 09:30 to 18:30. Busy all day except lunch and three 7-minute pauses
 /// (10:05, 10:50, 11:40), like reading an answer. Short pauses are not breaks, so rest still comes.
 /// Each reminder is answered one minute after it appears, as a person would.
 func coachSim() {
+    var fixedHours = DayConfig()
+    fixedHours.autoStart = false
     let store = UserDefaults(suiteName: "local.sundaran.claudestack.sim")!
     store.removePersistentDomain(forName: "local.sundaran.claudestack.sim")
     let c = DayCoach(store: store, useLog: false)
     c.soundOn = false
-    c.config = DayConfig()
+    c.config = fixedHours
     let cal = Calendar.current
     var t = cal.date(from: DateComponents(year: 2026, month: 10, day: 7, hour: 9, minute: 30))!
     let stop = cal.date(from: DateComponents(year: 2026, month: 10, day: 7, hour: 19, minute: 5))!
@@ -594,7 +596,7 @@ func coachSim() {
         s.removePersistentDomain(forName: "local.sundaran.claudestack.sim2")
         let p = DayCoach(store: s, useLog: false)
         p.soundOn = false
-        p.config = DayConfig()
+        p.config = fixedHours
         var u = cal.date(from: DateComponents(year: 2026, month: 10, day: 7, hour: 10))!
         for _ in 0..<720 { p.tick(busy: true, idle: 2, now: u); u = u.addingTimeInterval(5) }   // an hour at the desk
         for k in 0...(minutes * 12) { p.tick(busy: false, idle: Double(k * 5) + 1, now: u); u = u.addingTimeInterval(5) }
@@ -605,10 +607,78 @@ func coachSim() {
     print("pause 10 min starts rest timer again=\(restAfterPause(10) < 0.01)")
     // Saturday: no reminders at all.
     let sat = DayCoach(store: store, useLog: false)
-    sat.config = DayConfig()
+    sat.config = fixedHours
     sat.soundOn = false
     var s = cal.date(from: DateComponents(year: 2026, month: 10, day: 10, hour: 9, minute: 30))!
     var any = false
     for _ in 0..<(4 * 720) { sat.tick(busy: true, idle: 2, now: s); if sat.reminder != nil { any = true }; s = s.addingTimeInterval(5) }
     print("saturday phase=\(sat.phase) reminders=\(any)")
+    autoStartSim()
+}
+
+/// "Find my start time automatically", 8 hours. Wednesday 2026-10-08: away until 09:12, then at
+/// the desk, lunch away 13:00 to 13:45. The day ends 8 hours after 09:12 plus lunch: 17:57.
+func autoStartSim() {
+    let cal = Calendar.current
+    let f = DateFormatter(); f.dateFormat = "HH:mm"
+    func at(_ day: Int, _ h: Int, _ m: Int) -> Date { cal.date(from: DateComponents(year: 2026, month: 10, day: day, hour: h, minute: m))! }
+    func fresh(_ name: String) -> DayCoach {
+        let s = UserDefaults(suiteName: name)!
+        s.removePersistentDomain(forName: name)
+        let c = DayCoach(store: s, useLog: false)
+        c.soundOn = false
+        c.config = DayConfig()   // the default: autoStart on, 480 minutes
+        return c
+    }
+    print("auto default on=\(DayConfig().autoStart) minutes=\(DayConfig().workMinutes)")
+    // An old day.json without the new keys keeps its hours and gets the new defaults.
+    let old = #"{"start":"10:00","end":"19:00","checkFrom":"18:30","lunchStart":"13:00","lunchEnd":"14:00","waterMinutes":45,"restMinutes":90,"workdays":[2,3,4,5,6]}"#
+    if let o = try? JSONDecoder().decode(DayConfig.self, from: Data(old.utf8)) {
+        print("old config kept start=\(o.start) water=\(o.waterMinutes) auto=\(o.autoStart) minutes=\(o.workMinutes)")
+    }
+
+    let c = fresh("local.sundaran.claudestack.sim3")
+    var t = at(8, 7, 0)
+    var last: String?
+    var shownAt: Date?
+    var beforeReminder = false
+    while t < at(8, 18, 40) {
+        let m = cal.component(.hour, from: t) * 60 + cal.component(.minute, from: t)
+        let lunch = m >= 13 * 60 && m < 13 * 60 + 45
+        // Away since 23:00 last night, until 09:12.
+        let idle: Double = m < 9 * 60 + 12 ? Double(m + 60) * 60 : lunch ? Double(m - 13 * 60) * 60 + 1 : 0
+        c.tick(busy: false, idle: idle, now: t)
+        if m == 8 * 60, cal.component(.second, from: t) == 0 { print("auto 08:00 phase=\(c.phase)") }
+        if c.phase == "before", c.reminder != nil { beforeReminder = true }
+        let name = c.reminder.map { String("\($0)".prefix { $0 != "(" }) }
+        if let name, name == "windDown" || name == "dayDone", name != last { print("auto \(f.string(from: t)) \(name)"); shownAt = t }
+        last = name
+        if let s = shownAt, c.reminder != nil, t.timeIntervalSince(s) >= 60 { c.done(); shownAt = nil; last = nil }
+        t = t.addingTimeInterval(5)
+    }
+    let h = c.hours(on: at(8, 12, 0))
+    print("auto start=\(h.start.map(clock) ?? "-") end=\(h.end.map(clock) ?? "-") check=\(h.checkFrom.map(clock) ?? "-")")
+    print("auto no reminders before start=\(!beforeReminder) phase=\(c.phase)")
+
+    // Input before 5 AM (work after midnight) does not start the day.
+    let n = fresh("local.sundaran.claudestack.sim4")
+    n.tick(busy: false, idle: 2, now: at(8, 4, 30))
+    print("auto 04:30 input starts day=\(n.hours(on: at(8, 4, 30)).start != nil)")
+
+    // A quick look at 07:00 starts the day; "Start my day again" at 09:30 moves it.
+    let q = fresh("local.sundaran.claudestack.sim5")
+    q.tick(busy: false, idle: 0, now: at(8, 7, 0))
+    let early = q.hours(on: at(8, 7, 0)).start.map(clock) ?? "-"
+    q.tick(busy: false, idle: 9000, now: at(8, 9, 30))
+    q.restartToday(idle: 0, now: at(8, 9, 30))
+    print("auto restart early=\(early) now=\(q.hours(on: at(8, 9, 30)).start.map(clock) ?? "-")")
+
+    // A day that starts after lunch does not skip lunch; 4 hours from 08:00 ends before lunch.
+    var after = DayConfig(); after.workMinutes = 240
+    print("auto end from 08:00 4h=\(clock(after.autoEnd(from: at(8, 8, 0)))) from 14:00 8h=\(clock(DayConfig().autoEnd(from: at(8, 14, 0)))) from 13:20 8h=\(clock(DayConfig().autoEnd(from: at(8, 13, 20))))")
+
+    // Saturday: no start, no reminders.
+    let sat = fresh("local.sundaran.claudestack.sim6")
+    sat.tick(busy: false, idle: 2, now: at(10, 9, 30))
+    print("auto saturday phase=\(sat.phase) started=\(sat.hours(on: at(10, 9, 30)).start != nil)")
 }
