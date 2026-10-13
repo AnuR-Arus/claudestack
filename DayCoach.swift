@@ -1,4 +1,6 @@
 // The day coach: work time, water and rest reminders, lunch, the end of the day, and today's numbers.
+// The day starts at a fixed time, or (the default) at your first keyboard or mouse use, and then
+// ends after your work hours plus lunch.
 // Work time counts while you use the Mac: any keyboard or mouse input in the last 5 minutes.
 // Ten minutes with no input is a break. A shorter pause (reading an answer, a short call) stops
 // work time but is not a rest, so the rest timer keeps going. This measures you, not Claude.
@@ -16,13 +18,20 @@ let activeWithin: Double = 300
 /// No input for this long is a real break, and the rest timer starts again. Five minutes was too
 /// short: reading an answer or a call reset the timer many times a day, so rest never came.
 let breakAfter: Double = 600
+/// With "Find my start time automatically", input before this hour does not start the day, so
+/// work after midnight is not taken as the next day's start.
+let earliestStartHour = 5
+/// The time check for new tasks starts this many minutes before an automatic day ends.
+let autoCheckMinutes = 30
 
 let stackDir = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".claude/stack")
 let dayConfigURL = stackDir.appendingPathComponent("day.json")
 let daysDir = stackDir.appendingPathComponent("days")
 
 /// Shared with day-hook.sh, so both read the same hours.
-struct DayConfig: Codable {
+struct DayConfig: Codable, Equatable {
+    var autoStart = true         // the day starts at your first input; start, end and checkFrom are not used
+    var workMinutes = 480        // with autoStart: the length of the day, lunch not counted
     var start = "09:30"
     var end = "18:30"
     var checkFrom = "18:00"      // new tasks after this get a time check
@@ -31,6 +40,25 @@ struct DayConfig: Codable {
     var waterMinutes = 60
     var restMinutes = 120
     var workdays = [2, 3, 4, 5, 6]   // Calendar weekdays: 1 is Sunday, so Monday to Friday
+
+    init() {}
+
+    /// A missing key keeps its default. Without this, a day.json saved by an older build fails to
+    /// read, and load() writes the defaults over the hours you set.
+    init(from decoder: Decoder) throws {
+        let k = try decoder.container(keyedBy: CodingKeys.self)
+        let d = DayConfig()
+        autoStart = try k.decodeIfPresent(Bool.self, forKey: .autoStart) ?? d.autoStart
+        workMinutes = try k.decodeIfPresent(Int.self, forKey: .workMinutes) ?? d.workMinutes
+        start = try k.decodeIfPresent(String.self, forKey: .start) ?? d.start
+        end = try k.decodeIfPresent(String.self, forKey: .end) ?? d.end
+        checkFrom = try k.decodeIfPresent(String.self, forKey: .checkFrom) ?? d.checkFrom
+        lunchStart = try k.decodeIfPresent(String.self, forKey: .lunchStart) ?? d.lunchStart
+        lunchEnd = try k.decodeIfPresent(String.self, forKey: .lunchEnd) ?? d.lunchEnd
+        waterMinutes = try k.decodeIfPresent(Int.self, forKey: .waterMinutes) ?? d.waterMinutes
+        restMinutes = try k.decodeIfPresent(Int.self, forKey: .restMinutes) ?? d.restMinutes
+        workdays = try k.decodeIfPresent([Int].self, forKey: .workdays) ?? d.workdays
+    }
 
     static func load() -> DayConfig {
         if let d = try? Data(contentsOf: dayConfigURL), let c = try? JSONDecoder().decode(DayConfig.self, from: d) { return c }
@@ -47,6 +75,21 @@ struct DayConfig: Codable {
         let p = hm.split(separator: ":").compactMap { Int($0) }
         return Calendar.current.date(bySettingHour: p.first ?? 0, minute: p.count > 1 ? p[1] : 0, second: 0, of: day) ?? day
     }
+
+    /// With autoStart: the end of a day that started at `start`. Lunch is not work time, so the
+    /// part of lunch after the start is added. A day that ends before lunch skips it.
+    func autoEnd(from start: Date) -> Date {
+        let work = Double(workMinutes * 60)
+        let ls = time(lunchStart, on: start), le = time(lunchEnd, on: start)
+        let lunchAfterStart = max(0, le.timeIntervalSince(max(start, ls)))
+        if start.addingTimeInterval(work) <= ls { return start.addingTimeInterval(work) }
+        return start.addingTimeInterval(work + lunchAfterStart)
+    }
+}
+
+/// "8 h" or "8 h 30 min".
+func hoursText(_ minutes: Int) -> String {
+    minutes % 60 == 0 ? "\(minutes / 60) h" : "\(minutes / 60) h \(minutes % 60) min"
 }
 
 enum Reminder: Equatable {
@@ -89,6 +132,30 @@ final class DayCoach: ObservableObject {
     private var workSecs: Double { get { d.double(forKey: key("work")) } set { d.set(newValue, forKey: key("work")) } }
     private var waterAt: Double { get { d.double(forKey: key("waterAt")) } set { d.set(newValue, forKey: key("waterAt")) } }
     private var restAt: Double { get { d.double(forKey: key("restAt")) } set { d.set(newValue, forKey: key("restAt")) } }
+    /// With autoStart: when today started, as seconds since 1970. 0 means not started yet.
+    private var startedAt: Double { get { d.double(forKey: key("startedAt")) } set { d.set(newValue, forKey: key("startedAt")) } }
+
+    /// Today's start, end and time-check hour. Without autoStart they are the hours in Settings.
+    /// With autoStart, the start is nil until your first input today, and so is the end.
+    struct Hours { var start: Date?; var end: Date?; var checkFrom: Date? }
+    func hours(_ c: DayConfig? = nil, on now: Date = Date()) -> Hours {
+        let c = c ?? config
+        guard c.autoStart else {
+            return Hours(start: c.time(c.start, on: now), end: c.time(c.end, on: now), checkFrom: c.time(c.checkFrom, on: now))
+        }
+        guard Self.dayString(now) == day, startedAt > 0 else { return Hours() }
+        let s = Date(timeIntervalSince1970: startedAt), e = c.autoEnd(from: s)
+        return Hours(start: s, end: e, checkFrom: e.addingTimeInterval(Double(-autoCheckMinutes * 60)))
+    }
+
+    /// Settings: forget today's start, so your next input starts the day again. For a day that
+    /// started too early, for example a quick look at the Mac before work.
+    func restartToday(idle: Double? = nil, now: Date = Date()) {
+        startedAt = -1   // not 0: the earlier first prompt in today's log must not come back
+        for k in ["windDownSeen", "dayDoneSeen", "overtimeSeen"] { d.removeObject(forKey: key(k)) }
+        reminder = nil
+        tick(busy: false, idle: idle, now: now)
+    }
     private func flag(_ k: String) -> Bool { d.bool(forKey: key(k)) }
     private func setFlag(_ k: String) { d.set(true, forKey: key(k)) }
     private func count(_ k: String) -> Int { d.integer(forKey: key(k)) }
@@ -112,6 +179,11 @@ final class DayCoach: ObservableObject {
     }
 
     func save(_ c: DayConfig) {
+        // A new length or lunch moves the end, so the end-of-day cards may need to come again.
+        if c.autoStart != config.autoStart || c.workMinutes != config.workMinutes
+            || c.start != config.start || c.end != config.end || c.checkFrom != config.checkFrom {
+            for k in ["windDownSeen", "dayDoneSeen", "overtimeSeen"] { d.removeObject(forKey: key(k)) }
+        }
         config = c
         let enc = JSONEncoder()
         enc.outputFormatting = [.prettyPrinted, .sortedKeys]
@@ -143,11 +215,22 @@ final class DayCoach: ObservableObject {
         }
 
         let weekday = Calendar.current.component(.weekday, from: now)
-        let start = config.time(config.start, on: now), end = config.time(config.end, on: now)
-        let checkFrom = config.time(config.checkFrom, on: now)
         let workday = config.workdays.contains(weekday) && !dayOff
-        minutesLeft = max(0, Int(end.timeIntervalSince(now) / 60))
-        dayFraction = max(0, min(1, now.timeIntervalSince(start) / end.timeIntervalSince(start)))
+        if config.autoStart && workday && startedAt <= 0 && active
+            && Calendar.current.component(.hour, from: now) >= earliestStartHour {
+            // The day starts at your first input today. If the app opened late, an earlier prompt
+            // in today's log is an earlier start. After "Start again" (-1), only the input counts.
+            let earliest = config.time("\(earliestStartHour):00", on: now).timeIntervalSince1970
+            var s = max(earliest, now.timeIntervalSince1970 - idle)
+            if startedAt == 0, let p = log.firstPrompt, p >= earliest, p < s { s = p }
+            startedAt = s
+        }
+        let h = hours(on: now)
+        writeDayFile(h)
+        // Not started yet (autoStart): the day has no end, so it stays "before".
+        let start = h.start ?? .distantFuture, end = h.end ?? .distantFuture, checkFrom = h.checkFrom ?? .distantFuture
+        minutesLeft = h.end.map { max(0, Int($0.timeIntervalSince(now) / 60)) } ?? 0
+        dayFraction = h.start == nil ? 0 : max(0, min(1, now.timeIntervalSince(start) / end.timeIntervalSince(start)))
         waterFraction = min(1, (workSecs - waterAt) / Double(config.waterMinutes * 60))
         restFraction = min(1, (workSecs - restAt) / Double(config.restMinutes * 60))
         summary = DaySummary(prompts: log.prompts, tasksDone: log.stops, agents: log.agents,
@@ -170,6 +253,8 @@ final class DayCoach: ObservableObject {
     private func pick(now: Date, workday: Bool, active: Bool, end: Date) -> Reminder? {
         // Weekends and days off: no reminders at all.
         guard workday else { return nil }
+        // An automatic day that has not started: you are not at the Mac, so nothing to remind.
+        if config.autoStart && phase == "before" { return nil }
         if let s = snoozedUntil, now < s { return nil }
         if phase == "done" {
             if !flag("dayDoneSeen") { return .dayDone }
@@ -221,7 +306,7 @@ final class DayCoach: ObservableObject {
 
     // MARK: - Today's log, written by stack-hook.sh
 
-    struct Log { var prompts = 0, stops = 0, agents = 0; var lastPrompt: Double? }
+    struct Log { var prompts = 0, stops = 0, agents = 0; var firstPrompt: Double?, lastPrompt: Double? }
     private var logCache: (String, Date?, Log)?
 
     private func readLog(_ day: String) -> Log {
@@ -233,7 +318,10 @@ final class DayCoach: ObservableObject {
         for line in text.split(separator: "\n") {
             guard let o = try? JSONSerialization.jsonObject(with: Data(line.utf8)) as? [String: Any] else { continue }
             switch o["e"] as? String {
-            case "prompt": log.prompts += 1; log.lastPrompt = o["t"] as? Double
+            case "prompt":
+                log.prompts += 1
+                log.lastPrompt = o["t"] as? Double
+                if log.firstPrompt == nil { log.firstPrompt = log.lastPrompt }
             case "stop": log.stops += 1
             case "agent": log.agents += 1
             default: break
@@ -241,6 +329,29 @@ final class DayCoach: ObservableObject {
         }
         logCache = (day, mtime, log)
         return log
+    }
+
+    /// day-hook.sh cannot know an automatic day's hours, so they go in days/<date>.hours.json:
+    /// {"start":"09:12","end":"17:57","checkFrom":"17:27","endMin":1077,"checkMin":1047}.
+    /// The minutes count from today's midnight and can pass 1440 for a day that ends after it.
+    /// No file means the day has not started, and the hook stays silent.
+    private var writtenHours: (String, Double?, Double?)?
+    private func writeDayFile(_ h: Hours) {
+        guard useLog else { return }
+        let url = daysDir.appendingPathComponent("\(day).hours.json")
+        let sig = (day, h.start?.timeIntervalSince1970, h.end?.timeIntervalSince1970)
+        if let w = writtenHours, w.0 == sig.0, w.1 == sig.1, w.2 == sig.2 { return }
+        writtenHours = sig
+        guard config.autoStart, let s = h.start, let e = h.end, let c = h.checkFrom else {
+            try? FileManager.default.removeItem(at: url)
+            return
+        }
+        let f = DateFormatter(); f.dateFormat = "HH:mm"
+        let midnight = Calendar.current.startOfDay(for: s)
+        let o: [String: Any] = ["start": f.string(from: s), "end": f.string(from: e), "checkFrom": f.string(from: c),
+                                "endMin": Int(e.timeIntervalSince(midnight) / 60), "checkMin": Int(c.timeIntervalSince(midnight) / 60)]
+        try? FileManager.default.createDirectory(at: daysDir, withIntermediateDirectories: true)
+        try? JSONSerialization.data(withJSONObject: o, options: [.sortedKeys]).write(to: url, options: .atomic)
     }
 
     static func dayString(_ d: Date) -> String {
